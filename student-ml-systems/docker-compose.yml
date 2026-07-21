@@ -1,0 +1,80 @@
+version: "3.8"
+
+services:
+  # ─── Main application ────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: student-ml-app
+    ports:
+      - "8501:8501"   # Streamlit UI
+      - "5000:5000"   # MLflow UI
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./mlruns:/app/mlruns
+      - ./mlflow.db:/app/mlflow.db
+    environment:
+      - DATABASE_URL=postgresql://studentml:password@db:5432/student_ml
+      - MLFLOW_TRACKING_URI=postgresql://studentml:password@db:5432/student_ml
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_SERVER_PORT=8501
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - student-ml-net
+
+  # ─── PostgreSQL + pgvector ───────────────────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: student-ml-db
+    environment:
+      POSTGRES_USER: studentml
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: student_ml
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studentml -d student_ml"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - student-ml-net
+
+  # ─── MLflow server (separate container for clarity) ─────────────────────
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: student-ml-mlflow
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql://studentml:password@db:5432/student_ml --default-artifact-root file:///app/mlruns
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/app/mlruns
+    environment:
+      - MLFLOW_TRACKING_URI=postgresql://studentml:password@db:5432/student_ml
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles:
+      - mlflow  # Only start with: docker-compose --profile mlflow up
+    networks:
+      - student-ml-net
+
+networks:
+  student-ml-net:
+    driver: bridge
+
+volumes:
+  postgres_data:

@@ -468,12 +468,12 @@ Update this file with completion status:
 ## Completion Status
 
 - [x] Job 1: LSTM — [x] Code [x] Tests [ ] Docs
-- [ ] Job 2: Survival — [ ] Code [ ] Tests [ ] Docs
-- [ ] Job 3: Risk Scorer — [ ] Code [ ] Tests [ ] Docs
-- [ ] Job 4: Streamlit — [ ] Code [ ] Tests [ ] Docs
-- [ ] Job 5: MLflow — [ ] Code [ ] Tests [ ] Docs
-- [ ] Job 6: Docker — [ ] Code [ ] Tests [ ] Docs
-- [ ] Job 7: CI/CD — [ ] Code [ ] Tests [ ] Docs
+- [x] Job 2: Survival — [x] Code [x] Tests [ ] Docs
+- [x] Job 3: Risk Scorer — [x] Code [x] Tests [ ] Docs
+- [x] Job 4: Streamlit — [x] Code [x] Tests [ ] Docs
+- [x] Job 5: MLflow — [x] Code [x] Tests [ ] Docs
+- [x] Job 6: Docker — [x] Code [x] Tests [ ] Docs
+- [x] Job 7: CI/CD — [x] Code [x] Tests [ ] Docs
 ```
 
 ---
