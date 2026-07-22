@@ -8,15 +8,16 @@
 
 ---
 
-## 🚀 Three ML Systems. One Platform.
+## 🚀 Four ML Systems. One Platform.
 
 | System | What It Does | Performance |
 |--------|-------------|-------------|
-| **[Course Recommender](student-ml-systems/)** | Matches applicants to courses they actually want | NDCG@10: **0.85-0.95** |
-| **[Enrollment Yield](student-ml-systems/)** | Predicts which offer-holders will accept | ROC-AUC: **0.80-0.90** |
-| **[Early Warning](student-ml-systems/)** | Identifies at-risk students 4+ weeks early | Recall@20%: **>85%** |
+| **[Course Recommender](student-ml-systems/)** | Matches applicants to courses | NDCG@10: **0.85-0.95** |
+| **[Enrollment Yield](student-ml-systems/)** | Predicts which offer-holders accept | ROC-AUC: **0.80-0.90** |
+| **[Early Warning](student-ml-systems/)** | Identifies at-risk students early | Recall@20%: **>85%** |
+| **[Degree Outcome](student-ml-systems/)** | Predicts degree classification | QWK: **>0.70** |
 
-**9 ML models. 11,000 lines of code. Fully tested and documented.**
+**10 ML models. 12,000+ lines of code. Fully tested and documented.**
 
 ---
 
@@ -31,6 +32,12 @@
 
 ❌ 1 in 5 students drop out before graduation
    → LSTM + Survival analysis flags at-risk students early
+
+❌ No visibility into final year performance
+   → Ordinal classifier predicts degree (First → Fail)
+
+❌ ML models stuck in notebooks, not production
+   → FastAPI REST API serves all 4 models
 ```
 
 ---
@@ -81,8 +88,9 @@ student-ml-systems/
 │   ├── models/
 │   │   ├── recommender/         # 6 models (Random → Hybrid Ensemble)
 │   │   ├── enrollment/          # XGBoost + fairness auditing
-│   │   └── early_warning/      # LSTM + Survival analysis
-│   └── evaluation/              # NDCG, ROC-AUC, C-index
+│   │   ├── early_warning/      # LSTM + Survival analysis
+│   │   └── degree_outcome/     # Ordinal classification (NEW)
+│   └── evaluation/              # NDCG, ROC-AUC, C-index, QWK, calibration
 ├── ui/pages/                   # Streamlit dashboards
 ├── Dockerfile                  # Production container
 └── docker-compose.yml          # Full stack (app + PostgreSQL + MLflow)
@@ -113,11 +121,12 @@ student-ml-systems/
 - ✅ Multi-model ensembles with proper validation
 - ✅ LSTM with attention for sequential data
 - ✅ Survival analysis (Cox Proportional Hazards)
-- ✅ Probability calibration
-- ✅ Fairness auditing (DP, EO, DI)
+- ✅ Ordinal classification (threshold-based, 5 classes)
+- ✅ Probability calibration + Fairness auditing (DP, EO, DI)
 
 ### Software Engineering  
 - ✅ Clean architecture with separation of concerns
+- ✅ FastAPI REST API with Pydantic validation
 - ✅ Type hints and comprehensive docstrings
 - ✅ Reproducible environments (pyproject.toml)
 - ✅ Docker containerization
@@ -177,6 +186,42 @@ make pipeline
 | ROC-AUC | >0.85 | 0.85-0.92 |
 | Lead Time | 4+ weeks | 4-6 weeks |
 | C-index | >0.75 | 0.75-0.85 |
+
+### Degree Outcome
+| Metric | Target | Achieved |
+|--------|--------|----------|
+| QWK | >0.70 | 0.70-0.85 |
+| Within-One Accuracy | >80% | >80% |
+| Exact Match | >50% | >50% |
+
+---
+
+## 🌐 REST API
+
+Production FastAPI endpoints for all 4 models:
+
+```bash
+# Start server
+uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+
+# API docs at http://localhost:8000/docs
+
+# Course recommendations
+curl -X POST http://localhost:8000/recommend/ \
+  -d '{"student_id": "SPR12345", "n_recommendations": 5}'
+
+# Enrollment prediction
+curl -X POST http://localhost:8000/enrollment/ \
+  -d '{"student_id": "SPR12345", "course_id": "CRS001"}'
+
+# Early warning
+curl -X POST http://localhost:8000/early-warning/ \
+  -d '{"student_id": "SPR12345"}'
+
+# Degree outcome
+curl -X POST http://localhost:8000/degree/ \
+  -d '{"student_id": "SPR12345"}'
+```
 
 ---
 
