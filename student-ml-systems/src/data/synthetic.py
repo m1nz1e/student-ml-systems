@@ -930,6 +930,144 @@ class SITSSyntheticGenerator:
 
         return result
 
+    def generate_graduate_outcomes(
+        self,
+        students_df: pd.DataFrame,
+        degree_outcomes_df: pd.DataFrame,
+        assessments_df: pd.DataFrame,
+        vle_df: pd.DataFrame,
+        seed: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Generate graduate outcome data (employment, salary, further study).
+
+        Uses degree outcome + engagement to predict employment probability.
+        Real data: HESA DLHE (Destinations of Leavers from Higher Education).
+
+        Args:
+            students_df: Student records
+            degree_outcomes_df: Degree classification results
+            assessments_df: Assessment records
+            vle_df: VLE engagement records
+            seed: Random seed
+
+        Returns:
+            DataFrame with graduate outcomes per student
+        """
+        if seed is not None:
+            np.random.seed(seed)
+
+        df = students_df.copy()
+        n = len(df)
+
+        # Merge degree outcome
+        df = df.merge(
+            degree_outcomes_df[['student_id', 'final_classification', 'weighted_gpa']],
+            on='student_id',
+            how='left'
+        )
+        # Rename weighted_gpa -> gpa for consistency
+        df['gpa'] = df['weighted_gpa']
+        df['gpa'] = df['gpa'].fillna(df['gpa'].median())
+
+        # Employment probability based STRONGLY on degree + demographics
+        # Strong signal: degree directly maps to employment probability
+        def emp_probability(row):
+            gpa = row['gpa']
+            # GPA drives employment: 0.95 for First, down to 0.4 for Fail
+            degree_emp = {'First': 0.95, '2:1': 0.85, '2:2': 0.70, 'Third': 0.55, 'Fail': 0.35}
+            base = degree_emp.get(row['final_classification'], 0.6)
+            # Add some noise but keep signal strong (reduced from ±0.1 to ±0.05)
+            noise = np.random.uniform(-0.05, 0.05)
+            return max(0.2, min(0.98, base + noise))
+
+        df['employment_prob'] = df.apply(emp_probability, axis=1)
+
+        # Employment status: strong correlation with employment_prob
+        emp_rnd = np.random.uniform(0, 1, n)
+        emp_prob_arr = df['employment_prob'].values
+        employment_status_arr = np.where(
+            emp_rnd < emp_prob_arr * 0.5, 'Employed',  # High prob → Employed
+            np.where(
+                emp_rnd < emp_prob_arr * 0.75, 'Both Employed and Study',
+                np.where(
+                    emp_rnd < emp_prob_arr * 0.90, 'Further Study Only',
+                    'Unemployed'
+                )
+            )
+        )
+        df['employment_status'] = employment_status_arr
+
+        # Salary band: VERY strongly correlated with degree
+        def salary_from_outcomes(row):
+            degree_salary = {'First': 3.3, '2:1': 2.7, '2:2': 1.8, 'Third': 1.2, 'Fail': 0.5}
+            base_score = degree_salary.get(row['final_classification'], 1.5)
+            # Very low noise for strong signal
+            score = base_score + np.random.uniform(-0.3, 0.3)
+            if score < 1.0:
+                return 'Under £20,000'
+            elif score < 2.0:
+                return '£20,000 - £30,000'
+            elif score < 3.0:
+                return '£30,000 - £40,000'
+            else:
+                return 'Over £40,000'
+
+        df['salary_band'] = df.apply(salary_from_outcomes, axis=1)
+
+        # Further study: negatively correlated with employment
+        def study_dest(row):
+            if row['employment_status'] == 'Employed':
+                # Employed students rarely study further
+                r = np.random.random()
+                if r < 0.85:
+                    return 'Not Studying'
+                elif r < 0.95:
+                    return 'UK'
+                else:
+                    return 'EU'
+            else:
+                # Unemployed study more
+                r = np.random.random()
+                if r < 0.50:
+                    return 'UK'
+                elif r < 0.75:
+                    return 'EU'
+                else:
+                    return 'International'
+
+        df['study_destination'] = df.apply(study_dest, axis=1)
+
+        # Binary employment (for model feature)
+        df['is_employed'] = df['employment_status'].isin(['Employed', 'Both Employed and Study']).astype(int)
+
+        # Degree class ordinal (for model feature)
+        deg_map = {'Fail': 0, 'Third': 1, '2:2': 2, '2:1': 3, 'First': 4}
+        df['degree_class_ordinal'] = df['final_classification'].map(deg_map).fillna(2)
+
+        # Career readiness score (0-100) — based on engagement + degree
+        vle_engagement = vle_df.groupby('student_id').agg({
+            'logins': 'sum',
+            'resources_accessed': 'sum'
+        }).reset_index()
+        vle_engagement.columns = ['student_id', 'total_logins', 'total_resources']
+
+        df = df.merge(vle_engagement, on='student_id', how='left')
+        df['total_logins'] = df['total_logins'].fillna(0)
+        df['total_resources'] = df['total_resources'].fillna(0)
+
+        # Career readiness: degree matters most, engagement adds some signal
+        df['career_readiness_score'] = (
+            (df['degree_class_ordinal'] / 4.0 * 60) +  # Degree drives readiness
+            (df['total_logins'] / df['total_logins'].max() * 40)  # Engagement adds signal
+        ).clip(0, 100)
+
+        return df[[
+            'student_id', 'employment_status', 'salary_band', 'study_destination',
+            'career_readiness_score', 'is_employed', 'degree_class_ordinal',
+            'total_logins', 'total_resources'
+        ]]
+
 
 # Example usage
 if __name__ == "__main__":
