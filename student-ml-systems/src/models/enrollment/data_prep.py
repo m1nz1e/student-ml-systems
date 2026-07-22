@@ -373,54 +373,95 @@ class EnrollmentYieldFeatureEngineer:
 
         return df
 
-    def _scale_numeric_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Scale numeric features using StandardScaler."""
+    def _scale_numeric_features(self, df: pd.DataFrame, fit: bool = True) -> pd.DataFrame:
+        """
+        Scale numeric features using StandardScaler.
+        
+        CRITICAL: To prevent data leakage, scaling must be done AFTER train/test split.
+        This method is called during feature engineering but should be refit on training data only.
+        
+        Args:
+            df: DataFrame with features
+            fit: If True, fit new scaler. If False, use existing fitted scaler.
+        """
         from sklearn.preprocessing import StandardScaler
-
-        logger.info("Scaling numeric features...")
 
         numeric_cols = [col for col in df.columns if col.startswith("feat_") and df[col].dtype in ["int64", "float64"]]
 
-        scaler = StandardScaler()
-        df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
-        self.scalers["numeric_features"] = scaler
+        if fit:
+            # Fit on this data (should be training data only in production)
+            scaler = StandardScaler()
+            df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
+            self.scalers["numeric_features"] = scaler
+            logger.info(f"Fitted scaler on {len(df)} samples")
+        else:
+            # Transform using existing scaler (for test/validation data)
+            if "numeric_features" not in self.scalers:
+                raise ValueError("No fitted scaler found. Must fit on training data first.")
+            df[numeric_cols] = self.scalers["numeric_features"].transform(df[numeric_cols])
+            logger.info(f"Transformed {len(df)} samples with existing scaler")
 
         return df
 
     def create_train_test_split(
         self,
+        df: pd.DataFrame,
         X: np.ndarray,
         y: np.ndarray,
         stratified: bool = True,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Create train/test split.
-
+        Create train/test split with proper scaling to prevent data leakage.
+        
+        CRITICAL: This method handles the ENTIRE workflow:
+        1. Split data first
+        2. Fit scaler on training data ONLY
+        3. Transform test data with fitted scaler
+        
         Args:
-            X: Feature matrix
+            df: Full DataFrame (for splitting)
+            X: Feature matrix (before scaling)
             y: Target vector
             stratified: Whether to use stratified split
 
         Returns:
-            Tuple of (X_train, X_test, y_train, y_test)
+            Tuple of (df_train, df_test, X_train_scaled, X_test_scaled, y_train, y_test)
         """
         from sklearn.model_selection import train_test_split
 
         logger.info(f"Creating train/test split (test_size={self.test_size})...")
 
+        # Split DataFrame first (to maintain alignment)
         if stratified:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=self.test_size, stratify=y, random_state=self.random_state
+            df_train, df_test = train_test_split(
+                df, test_size=self.test_size, stratify=df[self.target_col], 
+                random_state=self.random_state
             )
         else:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=self.test_size, random_state=self.random_state
+            df_train, df_test = train_test_split(
+                df, test_size=self.test_size, random_state=self.random_state
             )
 
-        logger.info(f"Train: {len(X_train)}, Test: {len(X_test)}")
-        logger.info(f"Train positive rate: {y_train.mean():.2%}, Test positive rate: {y_test.mean():.2%}")
+        # Extract feature columns
+        feature_cols = [col for col in df.columns if col.startswith("feat_")]
+        
+        # Scale training data (FIT on train only)
+        X_train = df_train[feature_cols].values
+        X_train_scaled = self._scale_numeric_features(df_train.copy(), fit=True)[feature_cols].values
+        
+        # Scale test data (TRANSFORM using train scaler)
+        X_test = df_test[feature_cols].values
+        X_test_scaled = self._scale_numeric_features(df_test.copy(), fit=False)[feature_cols].values
+        
+        # Extract targets
+        y_train = df_train[self.target_col].values
+        y_test = df_test[self.target_col].values
 
-        return X_train, X_test, y_train, y_test
+        logger.info(f"Train: {len(X_train_scaled)}, Test: {len(X_test_scaled)}")
+        logger.info(f"Train positive rate: {y_train.mean():.2%}, Test positive rate: {y_test.mean():.2%}")
+        logger.info("✓ Scaling done correctly: fit on train, transform on test")
+
+        return df_train, df_test, X_train_scaled, X_test_scaled, y_train, y_test
 
 
 # Example usage
@@ -450,11 +491,13 @@ if __name__ == "__main__":
     print(f"Number of features: {len(engineer.feature_names)}")
     print(f"Positive class rate: {y.mean():.2%}")
 
-    # Create train/test split
-    X_train, X_test, y_train, y_test = engineer.create_train_test_split(X, y, stratified=True)
+    # CORRECT WORKFLOW: Use create_train_test_split to prevent data leakage
+    print("\nCreating train/test split with proper scaling...")
+    df_train, df_test, X_train, X_test, y_train, y_test = engineer.create_train_test_split(
+        df, X, y, stratified=True
+    )
 
-    print(f"\nTrain set: {X_train.shape}, Test set: {X_test.shape}")
-    print(f"Train positive rate: {y_train.mean():.2%}")
-    print(f"Test positive rate: {y_test.mean():.2%}")
-
-    print("\n✓ Feature engineering complete!")
+    print(f"\n✓ Train set: {X_train.shape}, Test set: {X_test.shape}")
+    print(f"✓ Train positive rate: {y_train.mean():.2%}")
+    print(f"✓ Test positive rate: {y_test.mean():.2%}")
+    print("\n✓ Feature engineering complete! Data leakage prevented.")

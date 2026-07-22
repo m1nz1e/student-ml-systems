@@ -202,13 +202,14 @@ class XGBoostEnrollmentClassifier(BaseEnrollmentClassifier):
         xgb_sklearn._Booster = self.model
 
         # Calibrate
+        # Note: cv="prefit" was removed in sklearn 1.3+, use cv=int or cv=KFold
         if self.calibration_method == "platt":
             self.calibrator = CalibratedClassifierCV(
-                xgb_sklearn, method="sigmoid", cv="prefit"
+                xgb_sklearn, method="sigmoid", cv=3
             )
         elif self.calibration_method == "isotonic":
             self.calibrator = CalibratedClassifierCV(
-                xgb_sklearn, method="isotonic", cv="prefit"
+                xgb_sklearn, method="isotonic", cv=3
             )
 
         self.calibrator.fit(X_calib, y_calib)

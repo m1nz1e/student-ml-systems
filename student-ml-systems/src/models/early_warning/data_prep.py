@@ -75,7 +75,7 @@ class EarlyWarningFeatureEngineer:
             enrollments_df: Enrollment outcomes
 
         Returns:
-            Tuple of (sequences, static_features, targets, metadata)
+            Tuple of (sequences, targets, student_ids, metadata)
         """
         logger.info("Creating early warning sequences...")
 
@@ -123,7 +123,6 @@ class EarlyWarningFeatureEngineer:
         y = np.array(targets)
 
         metadata = {
-            "student_ids": student_ids,
             "sequence_lengths": week_indices,
             "n_students": len(student_ids),
             "sequence_length": self.sequence_length,
@@ -134,7 +133,7 @@ class EarlyWarningFeatureEngineer:
         logger.info(f"Static features: {X_static.shape}")
         logger.info(f"Targets: {len(y)} (positive rate: {y.mean():.2%})")
 
-        return X_seq, X_static, y, metadata
+        return X_seq, y, np.array(student_ids), metadata
 
     def _get_student_weeks(
         self, vle_df: pd.DataFrame, attendance_df: pd.DataFrame
@@ -480,7 +479,7 @@ if __name__ == "__main__":
         min_weeks=4,
     )
 
-    X_seq, X_static, y, metadata = engineer.create_sequences(
+    X_seq, y, student_ids, metadata = engineer.create_sequences(
         vle_df=datasets["vle_engagement"],
         attendance_df=datasets["attendance"],
         assessments_df=datasets["assessments"],
@@ -489,7 +488,7 @@ if __name__ == "__main__":
     )
 
     print(f"\nSequence shape: {X_seq.shape}")
-    print(f"Static features: {X_static.shape}")
+    print(f"Targets shape: {y.shape}")
     print(f"Targets: {len(y)} (positive rate: {y.mean():.2%})")
     print(f"Students: {metadata['n_students']}")
 

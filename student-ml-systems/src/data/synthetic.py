@@ -4,6 +4,15 @@ Synthetic data generation for student ML systems.
 Generates realistic UK university data without using real student records.
 Mimics SITS field structure for portfolio authenticity.
 
+Field Mapping:
+    This generator uses synthetic field names. To connect to real SITS or Tribal data,
+    use the field mappings in `src/data/field_mapping.py`:
+    
+    - SITS:    `from src.data.field_mapping import SITS_FIELD_MAP`
+    - Tribal:  `from src.data.field_mapping import TRIBAL_FIELD_MAP`
+    
+    Then use `rename_to_synthetic(df, 'students')` to convert real data.
+
 Generates:
 - Student demographics (SPR table)
 - Qualifications (SCH table)
@@ -15,11 +24,14 @@ Generates:
 - VLE engagement (VLE table)
 """
 
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, List
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 import uuid
+
+# Import field mappings for SITS/Tribal compatibility
+from .field_mapping import SITS_FIELD_MAP, TRIBAL_FIELD_MAP, rename_to_synthetic
 
 
 class SITSSyntheticGenerator:
@@ -509,6 +521,17 @@ class SITSSyntheticGenerator:
         # Each student takes ~12 modules
         n_assessments = len(student_ids) * self.n_modules_per_course
 
+        # Pre-compute each student's innate ability effect (std=22 around 0)
+        # This creates wide between-student variation in marks.
+        # With ability_std=22 and assessment_std=15:
+        #   total variance ≈ 22^2 + 15^2 = 709 → std ≈ 26.6
+        #   Students with ability ≥ 5 average ≥ 70 (First territory)
+        #   Students with ability ≤ -25 average ≤ 40 (Fail territory)
+        _rng = np.random.RandomState(self.seed + 999)
+        student_abilities = {
+            sid: _rng.normal(0, 22) for sid in student_ids
+        }
+
         for _ in range(n_assessments):
             student_id = np.random.choice(student_ids)
             module_id = np.random.choice(module_ids)
@@ -519,8 +542,9 @@ class SITSSyntheticGenerator:
                 p=[0.40, 0.30, 0.15, 0.10, 0.05],
             )
 
-            # Mark (normal distribution, mean ~65%)
-            mark = np.random.normal(65, 15)
+            # Mark: base variation + per-student innate ability effect
+            ability = student_abilities[student_id]
+            mark = np.random.normal(65 + ability, 15)
             mark = np.clip(mark, 0, 100)
 
             # Submission status
@@ -535,12 +559,15 @@ class SITSSyntheticGenerator:
             # Attempt number (first, resit)
             attempt = np.random.choice([1, 2], p=[0.90, 0.10])
 
+            # Ensure mark is float before rounding
+            mark = float(mark) if not isinstance(mark, (float, np.floating)) else mark
+            
             assessments.append(
                 {
                     "student_id": student_id,
                     "module_id": module_id,
                     "assessment_type": assessment_type,
-                    "mark": mark.round(1),
+                    "mark": round(mark, 1),
                     "submitted": submitted,
                     "late_submission": not submitted or np.random.binomial(1, 0.08),
                     "attempt": attempt,
@@ -699,6 +726,209 @@ class SITSSyntheticGenerator:
             "attendance": attendance_df,
             "vle_engagement": vle_df,
         }
+
+    def generate_degree_outcomes(
+        self,
+        assessments_df: pd.DataFrame,
+        students_df: pd.DataFrame,
+        courses_df: pd.DataFrame,
+        enrollments_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Generate final degree classification outcomes.
+
+        Maps assessment marks to degree classifications using credit-weighted GPA,
+        with noise derived from VLE/attendance engagement patterns to create
+        realistic correlations between engagement and outcomes.
+
+        Args:
+            assessments_df: Assessment records with student_id, module_id, mark, credits
+            students_df: Student demographics (used for engagement signal noise)
+            courses_df: Course records (used for course-level difficulty adjustment)
+            enrollments_df: Enrollment records (maps students to courses)
+
+        Returns:
+            DataFrame with columns:
+            - student_id: Student identifier
+            - course_id: Course identifier
+            - final_classification: One of 'First', '2:1', '2:2', 'Third', 'Fail'
+            - weighted_gpa: Credit-weighted average mark (0-4 scale)
+            - years_to_complete: Actual years taken (with some early/late completers)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("Generating degree classification outcomes...")
+
+        # Map module_id -> course_id and credits from modules
+        # assessments reference module_id, we need course_id and credits
+        # Build a module lookup from the assessments themselves using course context
+        # Since assessments don't directly carry course_id, we infer from enrollment
+
+        # Get student -> course mapping from enrollments
+        student_course = enrollments_df[["student_id", "course_id"]].copy()
+        student_course = student_course.drop_duplicates(subset=["student_id"])
+
+        # Build a credit map per module from assessments
+        # We estimate credits as: assume modules with many assessments have more credits
+        # Better approach: use the module data if available via course_id join
+        # For synthetic, we'll attribute credits based on assessment weight patterns
+
+        # Join assessments with student->course mapping
+        df = assessments_df.merge(student_course, on="student_id", how="inner")
+
+        if len(df) == 0:
+            logger.warning("No matching enrollments found for assessments")
+            return pd.DataFrame(
+                columns=[
+                    "student_id",
+                    "course_id",
+                    "final_classification",
+                    "weighted_gpa",
+                    "years_to_complete",
+                ]
+            )
+
+        # Estimate module credits: use assessment count per module as proxy
+        # Modules with more assessments get more credits (realistic distribution)
+        module_assessment_counts = df.groupby("module_id").size()
+        credit_estimates = {}
+        for module_id, count in module_assessment_counts.items():
+            # Each assessment ~represents a portion of a module's credit load
+            # Standard: 10, 15, or 20 credits per module
+            credit_estimates[module_id] = np.random.choice(
+                [10, 15, 20], p=[0.30, 0.50, 0.20]
+            )
+
+        df["credits"] = df["module_id"].map(credit_estimates)
+
+        # --- Compute per-student credit-weighted GPA ---
+        # GPA = sum(mark * credits) / sum(credits), mapped to 0-4 scale
+        df["mark_scaled"] = df["mark"] / 25.0  # 0-100 → 0-4
+        df["weighted_mark"] = df["mark_scaled"] * df["credits"]
+
+        student_stats = df.groupby("student_id").agg(
+            total_weighted_mark=("weighted_mark", "sum"),
+            total_credits=("credits", "sum"),
+            course_id=("course_id", "first"),
+            n_assessments=("mark", "count"),
+            avg_mark=("mark", "mean"),
+            std_mark=("mark", "std"),
+        ).reset_index()
+
+        # --- Raw GPA from credit-weighted marks ---
+        student_stats["raw_gpa"] = (
+            student_stats["total_weighted_mark"] / student_stats["total_credits"]
+        )
+
+        # Course-level difficulty: each course has a base mark adjustment ±10
+        course_base_marks = {}
+        for course_id in student_stats["course_id"].unique():
+            # Realistic variation: engineering/cs harder, business softer
+            course_base_marks[course_id] = np.random.normal(0, 5)  # ±5 mark adjustment
+
+        student_stats["course_difficulty"] = student_stats["course_id"].map(course_base_marks)
+
+        # --- Build engagement signal for noise adjustment ---
+        # Students with high engagement get a small mark boost
+        engagement_boost = np.random.normal(0.08, 0.12, len(student_stats))
+        # Loosely correlate with performance proxy (high performers tend to engage more)
+        performance_proxy = (student_stats["avg_mark"] - 65) / 20.0
+        engagement_boost += 0.35 * performance_proxy
+        student_stats["engagement_noise"] = np.clip(engagement_boost, -0.4, 0.4)
+
+        # --- Widen the mark distribution to realistic extremes ---
+        # Raw marks cluster around 65%; we need Firsts (≥70%) and Fails (<40%).
+        # Apply a signed deviation push: extreme students get pushed further out.
+        student_stats["adjusted_gpa"] = student_stats["raw_gpa"] + (
+            student_stats["course_difficulty"] / 25.0
+        )
+        # deviation > 0 → push up (helps Firsts); deviation < 0 → push down (helps Fails)
+        deviation_from_mean = student_stats["adjusted_gpa"] - 2.6
+        student_stats["adjusted_gpa"] = (
+            student_stats["adjusted_gpa"] + 0.30 * deviation_from_mean
+        ).clip(0.0, 4.0)
+
+        # --- Final GPA with engagement noise + targeted class balancing ---
+        # Blend adjusted GPA with engagement signal and add a small jitter
+        # to avoid mass concentration at class boundaries
+        _jitter_rng = np.random.RandomState(self.seed + 7)
+        student_stats["final_gpa"] = (
+            0.80 * student_stats["adjusted_gpa"]
+            + 0.20 * student_stats["engagement_noise"]
+            + _jitter_rng.normal(0, 0.05, len(student_stats))
+        ).clip(0.0, 4.0)
+
+        # --- Targeted percentile boosts to ensure all 5 classification appear ---
+        # Compute GPA percentiles and selectively shift extreme students into each class
+        # to match realistic UK university distribution (~15% First, ~35% 2:1, ~35% 2:2, ~10% Third, ~5% Fail)
+        gpa_series = student_stats["final_gpa"]
+
+        # First-class: push top ~4% above 3.7 threshold
+        pct_96 = gpa_series.quantile(0.96)
+        mask_first = (gpa_series >= pct_96) & (gpa_series < 3.7)
+        student_stats.loc[mask_first, "final_gpa"] = (
+            gpa_series[mask_first] + (3.75 - gpa_series[mask_first].min()) * 0.5
+        ).clip(3.70, 4.0)
+
+        # 2:1 zone: ensure top-remaining students above 3.0
+        mask_2_1 = (gpa_series < pct_96) & (gpa_series >= gpa_series.quantile(0.60))
+        # Fine: leave these as-is
+
+        # Fail: push bottom ~5% below 1.0 threshold
+        pct_05 = gpa_series.quantile(0.05)
+        mask_fail = (gpa_series <= pct_05) & (gpa_series >= 1.0)
+        student_stats.loc[mask_fail, "final_gpa"] = (
+            gpa_series[mask_fail] - (gpa_series[mask_fail].max() - 0.85) * 0.5
+        ).clip(0.0, 0.99)
+
+        # Map GPA to degree classification
+        def gpa_to_classification(gpa: float) -> str:
+            if gpa >= 3.7:
+                return "First"
+            elif gpa >= 3.0:
+                return "2:1"
+            elif gpa >= 2.0:
+                return "2:2"
+            elif gpa >= 1.0:
+                return "Third"
+            else:
+                return "Fail"
+
+        student_stats["final_classification"] = student_stats["final_gpa"].apply(gpa_to_classification)
+        student_stats["weighted_gpa"] = student_stats["final_gpa"].round(3)
+
+        # Years to complete (course length with some variation)
+        course_lengths = courses_df.set_index("course_id")["course_length_years"].to_dict()
+        student_stats["course_length"] = student_stats["course_id"].map(course_lengths).fillna(3)
+
+        # Most students complete on time, some early/late
+        years_complete = []
+        for _, row in student_stats.iterrows():
+            base_years = row["course_length"]
+            if row["final_classification"] == "Fail":
+                # Fails often take longer (resits) or don't complete
+                years = base_years + np.random.choice([0, 1, 2], p=[0.2, 0.5, 0.3])
+            else:
+                years = base_years + np.random.choice([-1, 0, 0, 1], p=[0.05, 0.15, 0.70, 0.10])
+            years = max(1, min(years, base_years + 2))
+            years_complete.append(years)
+
+        student_stats["years_to_complete"] = years_complete
+
+        result = student_stats[[
+            "student_id",
+            "course_id",
+            "final_classification",
+            "weighted_gpa",
+            "years_to_complete",
+        ]].copy()
+
+        logger.info(
+            f"Generated {len(result)} degree outcomes: "
+            f"{result['final_classification'].value_counts().to_dict()}"
+        )
+
+        return result
 
 
 # Example usage
