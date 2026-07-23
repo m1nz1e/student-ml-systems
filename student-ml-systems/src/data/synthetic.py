@@ -1069,6 +1069,154 @@ class SITSSyntheticGenerator:
         ]]
 
 
+    def generate_nss_outcomes(
+        self,
+        students_df: pd.DataFrame,
+        degree_outcomes_df: pd.DataFrame,
+        vle_df: pd.DataFrame,
+        assessments_df: pd.DataFrame,
+        seed: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Generate NSS (National Student Survey) outcomes.
+
+        Predicts student satisfaction across 7 themes:
+        - Teaching
+        - Assessment
+        - Feedback
+        - Support
+        - Organisation
+        - Learning Resources
+        - Student Voice
+
+        Also predicts:
+        - Overall satisfaction (binary)
+        - NPS (Net Promoter Score)
+
+        Real data: HESA NSS survey responses.
+
+        Args:
+            students_df: Student records
+            degree_outcomes_df: Degree classification results
+            vle_df: VLE engagement records
+            assessments_df: Assessment records
+            seed: Random seed
+
+        Returns:
+            DataFrame with NSS outcomes per student
+        """
+        if seed is not None:
+            np.random.seed(seed)
+
+        df = students_df.copy()
+        n = len(df)
+
+        # Merge degree outcome
+        df = df.merge(
+            degree_outcomes_df[['student_id', 'final_classification', 'weighted_gpa']],
+            on='student_id',
+            how='left'
+        )
+        df['gpa'] = df['weighted_gpa'].fillna(df['weighted_gpa'].median())
+
+        # VLE engagement summary
+        vle_agg = vle_df.groupby('student_id').agg({
+            'logins': 'sum',
+            'resources_accessed': 'sum',
+            'total_actions': 'sum'
+        }).reset_index()
+        vle_agg.columns = ['student_id', 'total_logins', 'total_resources', 'total_actions']
+        df = df.merge(vle_agg, on='student_id', how='left')
+        df['total_logins'] = df['total_logins'].fillna(0)
+        df['total_resources'] = df['total_resources'].fillna(0)
+        df['total_actions'] = df['total_actions'].fillna(0)
+
+        # Normalise engagement
+        df['engagement_rate'] = df['total_actions'] / df['total_actions'].max() * 100
+
+        # NSS theme scores — strongly correlated with degree + engagement
+        # Base satisfaction from degree class
+        degree_satisfaction = {
+            'First': 85, '2:1': 78, '2:2': 68, 'Third': 58, 'Fail': 48
+        }
+
+        # Function to generate theme score with some variation
+        def theme_score(base_sat: float, engagement: float, noise_range: float = 8.0) -> float:
+            """Generate theme score with base satisfaction + engagement boost + noise."""
+            boost = engagement * 0.15  # Engagement adds up to 15 points
+            noise = np.random.uniform(-noise_range, noise_range)
+            return max(10, min(100, base_sat + boost + noise))
+
+        # Generate base satisfaction
+        df['base_satisfaction'] = df['final_classification'].map(degree_satisfaction).fillna(65)
+
+        # Theme-specific scores (some themes more variable than others)
+        df['teaching_score'] = df.apply(
+            lambda r: theme_score(r['base_satisfaction'], r['engagement_rate'], 7.0), axis=1
+        )
+        df['assessment_score'] = df.apply(
+            lambda r: theme_score(r['base_satisfaction'] - 5, r['engagement_rate'], 10.0), axis=1  # More variable
+        )
+        df['feedback_score'] = df.apply(
+            lambda r: theme_score(r['base_satisfaction'] - 8, r['engagement_rate'], 12.0), axis=1  # Most variable
+        )
+        df['support_score'] = df.apply(
+            lambda r: theme_score(r['base_satisfaction'] + 3, r['engagement_rate'], 6.0), axis=1
+        )
+        df['organisation_score'] = df.apply(
+            lambda r: theme_score(r['base_satisfaction'] - 3, r['engagement_rate'], 9.0), axis=1
+        )
+        df['learning_resources_score'] = df.apply(
+            lambda r: theme_score(r['base_satisfaction'] + 5, r['engagement_rate'], 5.0), axis=1  # Most stable
+        )
+        df['student_voice_score'] = df.apply(
+            lambda r: theme_score(r['base_satisfaction'] - 5, r['engagement_rate'], 11.0), axis=1
+        )
+
+        # Overall satisfaction (weighted average of themes)
+        df['overall_score'] = (
+            df['teaching_score'] * 0.25 +
+            df['assessment_score'] * 0.15 +
+            df['feedback_score'] * 0.15 +
+            df['support_score'] * 0.15 +
+            df['organisation_score'] * 0.10 +
+            df['learning_resources_score'] * 0.10 +
+            df['student_voice_score'] * 0.10
+        )
+
+        # Binary satisfaction (satisfied if overall >= 60)
+        df['overall_satisfied'] = (df['overall_score'] >= 60).astype(int)
+
+        # NPS (0-10 scale, correlated with overall)
+        df['nps_score'] = (df['overall_score'] / 10).clip(0, 10).round().astype(int)
+
+        # Response rate (some students don't respond — correlated with engagement)
+        df['response_rate'] = np.where(
+            df['engagement_rate'] > 50,
+            np.random.choice([0, 1], size=n, p=[0.1, 0.9]),  # High engagement → 90% respond
+            np.random.choice([0, 1], size=n, p=[0.4, 0.6])   # Low engagement → 60% respond
+        )
+
+        # Module evaluations submitted (correlated with engagement)
+        df['module_evals_submitted'] = (
+            df['engagement_rate'] / 100 * 8 + np.random.uniform(-1, 1, n)
+        ).clip(0, 8).round().astype(int)
+
+        # Feedback response rate
+        df['feedback_response_rate'] = (
+            df['engagement_rate'] * 0.8 + np.random.uniform(-10, 10, n)
+        ).clip(0, 100)
+
+        return df[[
+            'student_id',
+            'teaching_score', 'assessment_score', 'feedback_score',
+            'support_score', 'organisation_score', 'learning_resources_score',
+            'student_voice_score', 'overall_score', 'overall_satisfied',
+            'nps_score', 'response_rate', 'module_evals_submitted',
+            'feedback_response_rate', 'engagement_rate'
+        ]]
+
+
 # Example usage
 if __name__ == "__main__":
     # Generate synthetic data
