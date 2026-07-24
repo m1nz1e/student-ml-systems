@@ -1445,6 +1445,149 @@ class SITSSyntheticGenerator:
             'low_engagement', 'low_grade'
         ]]
 
+    def generate_exam_outcomes(
+        self,
+        students_df: pd.DataFrame,
+        assessments_df: pd.DataFrame,
+        vle_df: pd.DataFrame,
+        modules_df: pd.DataFrame,
+        degree_outcomes_df: pd.DataFrame,
+        seed: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Generate exam performance predictions.
+
+        Predicts:
+        - exam_mark: predicted exam score (0-100)
+        - pass_fail: binary (1=pass, 0=fail)
+        - grade_class: ordinal (Fail/Pass/Merit/Distinction)
+        - prediction_confidence: uncertainty estimate (0-1)
+
+        Real data: HESA Student Record exam results.
+
+        Args:
+            students_df: Student records
+            assessments_df: Assessment records (coursework)
+            vle_df: VLE engagement records
+            modules_df: Module records
+            degree_outcomes_df: Degree classification results
+            seed: Random seed
+
+        Returns:
+            DataFrame with exam predictions per student per module
+        """
+        if seed is not None:
+            np.random.seed(seed)
+
+        df = students_df.copy()
+        n = len(df)
+
+        # Coursework average per student
+        coursework = assessments_df.groupby('student_id').agg({
+            'mark': ['mean', 'std', 'min', 'max', 'count']
+        }).reset_index()
+        coursework.columns = ['student_id', 'cw_mean', 'cw_std', 'cw_min', 'cw_max', 'n_courseworks']
+        df = df.merge(coursework, on='student_id', how='left')
+        for col in ['cw_mean', 'cw_std', 'cw_min', 'cw_max', 'n_courseworks']:
+            if col in df.columns:
+                df[col] = df[col].fillna(df[col].median())
+
+        # VLE engagement
+        vle_agg = vle_df.groupby('student_id').agg({
+            'logins': 'sum',
+            'resources_accessed': 'sum',
+            'total_actions': 'sum'
+        }).reset_index()
+        vle_agg.columns = ['student_id', 'total_logins', 'total_resources', 'total_actions']
+        df = df.merge(vle_agg, on='student_id', how='left')
+        for col in ['total_logins', 'total_resources', 'total_actions']:
+            if col in df.columns:
+                df[col] = df[col].fillna(0)
+
+        # Engagement rate
+        df['engagement_rate'] = (df['total_actions'] / (df['total_actions'].max() + 1)) * 100
+
+        # Degree outcome (predicted final classification) — also provides course_id mapping
+        if degree_outcomes_df is not None:
+            degree_map = {'First': 75, '2:1': 68, '2:2': 58, 'Third': 50, 'Fail': 35}
+            deg_df = degree_outcomes_df[['student_id', 'course_id', 'final_classification']].copy()
+            deg_df['predicted_final_score'] = deg_df['final_classification'].map(degree_map).fillna(60)
+            df = df.merge(deg_df[['student_id', 'course_id', 'predicted_final_score']], on='student_id', how='left')
+            df['predicted_final_score'] = df['predicted_final_score'].fillna(60)
+        else:
+            df['predicted_final_score'] = 60
+            # Fallback: get course_id from modules via assessments
+            if modules_df is not None and assessments_df is not None:
+                student_course = (
+                    assessments_df[['student_id', 'module_id']]
+                    .merge(modules_df[['module_id', 'course_id']], on='module_id', how='left')
+                    .drop_duplicates('student_id')[['student_id', 'course_id']]
+                )
+                df = df.merge(student_course, on='student_id', how='left')
+            else:
+                df['course_id'] = None
+
+        # Module info (exam weight, difficulty)
+        if modules_df is not None:
+            mod_info = modules_df[['module_id', 'course_id', 'exam_weight_pct', 'average_mark', 'pass_rate']].copy()
+            # Take a representative module per student
+            mod_sample = mod_info.groupby('course_id').first().reset_index()
+            df = df.merge(mod_sample, on='course_id', how='left')
+            df['exam_weight_pct'] = df['exam_weight_pct'].fillna(60)
+            df['module_pass_rate'] = df['pass_rate'].fillna(0.85)
+            df['module_avg_mark'] = df['average_mark'].fillna(65)
+        else:
+            df['exam_weight_pct'] = 60
+            df['module_pass_rate'] = 0.85
+            df['module_avg_mark'] = 65
+
+        # Base exam prediction from coursework + engagement
+        # Exam mark ≈ coursework average adjusted by engagement and module difficulty
+        engagement_factor = df['engagement_rate'] / 100 * 0.15  # up to +15 for high engagement
+        difficulty_factor = (df['module_avg_mark'] - 65) / 65 * 0.1  # adjust for module difficulty
+        final_factor = (df['predicted_final_score'] - 65) / 65 * 0.2  # align with predicted trajectory
+
+        df['base_exam_mark'] = df['cw_mean'] * 0.6 + df['predicted_final_score'] * 0.4
+        df['exam_mark_raw'] = (
+            df['base_exam_mark']
+            + engagement_factor * 30
+            + difficulty_factor * 20
+            + final_factor * 15
+            + np.random.uniform(-8, 8, n)
+        )
+        df['exam_mark'] = df['exam_mark_raw'].clip(0, 100).round(1)
+
+        # Pass/Fail (threshold 40 for undergrad)
+        df['pass_fail'] = (df['exam_mark'] >= 40).astype(int)
+
+        # Grade class (ordinal)
+        def grade_class(mark):
+            if mark >= 70: return 'Distinction'
+            elif mark >= 60: return 'Merit'
+            elif mark >= 40: return 'Pass'
+            else: return 'Fail'
+
+        df['grade_class'] = df['exam_mark'].apply(grade_class)
+
+        # Confidence (based on data quality and consistency)
+        # High confidence: consistent coursework marks + high engagement
+        # Low confidence: high variance in marks or low engagement
+        cw_consistency = 1 / (1 + df['cw_std'].fillna(0) / 10)
+        engagement_factor_conf = df['engagement_rate'] / 100
+        data_quality = df['n_courseworks'].clip(1, 20) / 20
+        df['prediction_confidence'] = (
+            cw_consistency * 0.4 +
+            engagement_factor_conf * 0.3 +
+            data_quality * 0.3
+        ).clip(0, 1).round(3)
+
+        return df[[
+            'student_id', 'exam_mark', 'pass_fail', 'grade_class',
+            'prediction_confidence', 'cw_mean', 'cw_std',
+            'engagement_rate', 'exam_weight_pct', 'module_pass_rate',
+            'predicted_final_score'
+        ]]
+
 
 # Example usage
 if __name__ == "__main__":
