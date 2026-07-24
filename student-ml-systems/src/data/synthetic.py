@@ -444,32 +444,66 @@ class SITSSyntheticGenerator:
         """
         modules = []
 
-        module_prefixes = ["Introduction to", "Advanced", "Applied", "Foundations of", "Topics in"]
-        module_topics = [
-            "Programming",
-            "Data Structures",
-            "Algorithms",
-            "Machine Learning",
-            "Database Systems",
-            "Web Development",
-            "Software Engineering",
-            "Computer Networks",
-            "Operating Systems",
-            "Artificial Intelligence",
-            "Statistics",
-            "Mathematics",
-            "Research Methods",
-            "Project Management",
-            "Professional Practice",
-        ]
+        # UCL module naming: DEPT#### (4-letter dept + 4 digits)
+        # First digit = year (1,2,3 = undergrad, 5 = masters)
+        ucl_departments = {
+            "COMP": "Computer Science",
+            "STAT": "Statistics",
+            "MATH": "Mathematics",
+            "DATA": "Data Science",
+            "ECON": "Economics",
+            "PSYC": "Psychology",
+            "BIOL": "Biology",
+            "PHYS": "Physics",
+            "CHEM": "Chemistry",
+            "SENG": "Software Engineering",
+            "ELEC": "Electronic Engineering",
+            "MECH": "Mechanical Engineering",
+            "MGTN": "Management",
+            "LAWS": "Law",
+            "HIST": "History",
+            "PHIL": "Philosophy",
+        }
+        # UCL module topics by department
+        ucl_module_topics = {
+            "COMP": ["Programming", "Algorithms", "Machine Learning", "Database Systems",
+                     "Web Development", "Software Engineering", "Computer Networks",
+                     "Operating Systems", "Artificial Intelligence", "Security", "Graphics"],
+            "STAT": ["Statistical Methods", "Probability", "Stochastic Processes",
+                     "Bayesian Statistics", "Time Series", "Statistical Computing"],
+            "MATH": ["Calculus", "Linear Algebra", "Differential Equations", "Analysis",
+                      "Number Theory", "Combinatorics", "Numerical Analysis"],
+            "DATA": ["Data Mining", "Data Visualisation", "Big Data", "Data Ethics",
+                      "Statistical Learning", "Predictive Analytics"],
+            "ECON": ["Microeconomics", "Macroeconomics", "Econometrics", "Finance",
+                      "International Economics", "Labour Economics"],
+            "PSYC": ["Cognitive Psychology", "Developmental Psychology", "Research Methods",
+                      "Social Psychology", "Neuroscience", "Clinical Psychology"],
+            "BIOL": ["Cell Biology", "Genetics", "Ecology", "Microbiology", "Biochemistry"],
+            "PHYS": ["Classical Mechanics", "Quantum Physics", "Thermodynamics", "Electromagnetism"],
+            "CHEM": ["Organic Chemistry", "Inorganic Chemistry", "Physical Chemistry", "Analytical Chemistry"],
+            "SENG": ["Software Architecture", "Requirements Engineering", "Testing", "DevOps"],
+            "ELEC": ["Circuits", "Signals", "Control Systems", "Communications"],
+            "MECH": ["Fluid Mechanics", "Thermodynamics", "Materials", "Dynamics"],
+            "MGTN": ["Strategic Management", "Marketing", "Finance", "Organisational Behaviour", "Entrepreneurship"],
+            "LAWS": ["Contract Law", "Criminal Law", "Public Law", "Tort Law", "EU Law"],
+            "HIST": ["Modern History", "Medieval History", "Economic History", "Cultural History"],
+            "PHIL": ["Ethics", "Logic", "Metaphysics", "Epistemology", "Political Philosophy"],
+        }
+        dept_list = list(ucl_departments.keys())
 
-        for course_id in course_ids:
+        for course_idx, course_id in enumerate(course_ids):
             for i in range(n_modules):
-                module_id = f"{course_id}_MOD{str(i + 1).zfill(2)}"
-                module_name = f"{np.random.choice(module_prefixes)} {np.random.choice(module_topics)}"
+                # UCL module code: DEPT#### (dept code + 4 digits)
+                # Year 1-3 = undergrad, year 4/5 = masters level
+                year = np.random.choice([1, 2, 3, 4, 5], p=[0.35, 0.30, 0.20, 0.10, 0.05])
+                seq_num = str(i + 1).zfill(3)  # 001, 002, ... per course
+                dept_code = dept_list[course_idx % len(dept_list)]
+                module_id = f"{dept_code}{year}{seq_num}"  # e.g. COMP1001
 
-                # Year of study (1, 2, or 3)
-                year = np.random.choice([1, 2, 3], p=[0.40, 0.35, 0.25])
+                # UCL module name: short title format
+                topics = ucl_module_topics.get(dept_code, ucl_module_topics["COMP"])
+                module_name = f"{np.random.choice(topics)}"  # e.g. "Introduction to Programming"
 
                 # Credits (typically 10, 15, or 20)
                 credits = np.random.choice([10, 15, 20], p=[0.30, 0.50, 0.20])
@@ -493,6 +527,8 @@ class SITSSyntheticGenerator:
                         "module_name": module_name,
                         "year": year,
                         "credits": credits,
+                        "department": ucl_departments[dept_code],
+                        "dept_code": dept_code,
                         "exam_weight_pct": exam_weight,
                         "coursework_weight_pct": coursework_weight,
                         "average_mark": avg_mark.round(1),
@@ -1252,37 +1288,41 @@ class SITSSyntheticGenerator:
         if seed is not None:
             np.random.seed(seed)
         df = modules_df.copy()
-        # Get department from courses table via course_id
-        if 'department' not in df.columns and 'course_id' in df.columns:
-            courses = self.generate_courses()
-            df = df.merge(courses[['course_id', 'department']], on='course_id', how='left')
         n = len(df)
+        # Get dept_code from modules (already added)
+        # Capacity: UCL typical module capacity is 100-300
+        if 'capacity' not in df.columns:
+            df['capacity'] = np.random.randint(80, 280, n)
+        # Historical enrollment counts per module
         hist_counts = module_enrollments_df.groupby('module_id').size().reset_index()
         hist_counts.columns = ['module_id', 'historical_avg']
         df = df.merge(hist_counts, on='module_id', how='left')
         df['historical_avg'] = df['historical_avg'].fillna(0)
-        # Derive synthetic capacity from historical data if not present
-        if 'capacity' not in df.columns:
-            max_hist = df['historical_avg'].max() if df['historical_avg'].max() > 0 else 50
-            df['capacity'] = (df['historical_avg'] * 1.2 + np.random.uniform(5, 15, n)).clip(lower=10).astype(int)
         df['base_demand'] = df['historical_avg'] * np.random.uniform(0.95, 1.15, n)
+        # UCL department popularity multiplier
         dept_popularity = {
-            'Computer Science': 1.3, 'Data Science': 1.25, 'Mathematics': 1.1,
-            'Business': 1.0, 'Engineering': 0.95, 'Science': 0.9, 'Humanities': 0.85, 'Arts': 0.8
+            'Computer Science': 1.3, 'Software Engineering': 1.25,
+            'Data Science': 1.25, 'Statistics': 1.2,
+            'Mathematics': 1.1, 'Economics': 1.05,
+            'Electronic Engineering': 1.0, 'Physics': 1.0,
+            'Mechanical Engineering': 0.95, 'Chemistry': 0.9,
+            'Biology': 0.9, 'Psychology': 0.85,
+            'Management': 0.85, 'Law': 0.8,
+            'History': 0.7, 'Philosophy': 0.7
         }
         df['dept_multiplier'] = df['department'].map(dept_popularity).fillna(1.0)
         df['enrollment_count'] = (df['base_demand'] * df['dept_multiplier']).round().astype(int).clip(lower=5)
-        df['fill_rate'] = (df['enrollment_count'] / df['capacity'] * 100).clip(0, 150) if 'capacity' in df.columns else df['enrollment_count']
+        df['fill_rate'] = (df['enrollment_count'] / df['capacity'] * 100).clip(0, 150)
         def demand_category(row):
-            rate = row.get('fill_rate', row.get('enrollment_count', 50))
+            rate = row['fill_rate']
             if rate >= 100: return 'Oversubscribed'
             elif rate >= 80: return 'High'
             elif rate >= 50: return 'Medium'
             else: return 'Low'
         df['demand_category'] = df.apply(demand_category, axis=1)
         df['popularity_score'] = (df['fill_rate'].clip(0, 100) * 0.7 + df['dept_multiplier'] * 30).clip(0, 100)
-        return df[['module_id', 'module_name', 'department', 'capacity',
-                    'enrollment_count', 'fill_rate', 'demand_category', 'popularity_score']]
+        return df[['module_id', 'module_name', 'dept_code', 'department', 'capacity',
+                    'year', 'credits', 'enrollment_count', 'fill_rate', 'demand_category', 'popularity_score']]
 
 
 # Example usage
