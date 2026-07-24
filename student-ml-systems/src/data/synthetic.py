@@ -1324,6 +1324,127 @@ class SITSSyntheticGenerator:
         return df[['module_id', 'module_name', 'dept_code', 'department', 'capacity',
                     'year', 'credits', 'enrollment_count', 'fill_rate', 'demand_category', 'popularity_score']]
 
+    def generate_retention_outcomes(
+        self,
+        students_df: pd.DataFrame,
+        vle_df: pd.DataFrame,
+        assessments_df: pd.DataFrame,
+        degree_outcomes_df: pd.DataFrame,
+        seed: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Generate student retention/departure outcomes.
+
+        Predicts:
+        - retention_risk: binary (1=dropped out, 0=retained)
+        - risk_score: 0-100 likelihood of leaving
+        - risk_category: Low / Medium / High / Critical
+        - departure_year: year of departure (0 if retained)
+
+        Real data: HESA Student Record (DLHE + ILR).
+
+        Args:
+            students_df: Student records
+            vle_df: VLE engagement records
+            assessments_df: Assessment records
+            degree_outcomes_df: Degree classification results
+            seed: Random seed
+
+        Returns:
+            DataFrame with retention outcomes per student
+        """
+        if seed is not None:
+            np.random.seed(seed)
+
+        df = students_df.copy()
+        n = len(df)
+
+        # Merge engagement data
+        vle_agg = vle_df.groupby('student_id').agg({
+            'logins': 'sum',
+            'resources_accessed': 'sum',
+            'total_actions': ['sum', 'mean']
+        }).reset_index()
+        vle_agg.columns = ['student_id', 'total_logins', 'total_resources', 'total_actions', 'avg_actions']
+        df = df.merge(vle_agg, on='student_id', how='left')
+        for col in ['total_logins', 'total_resources', 'total_actions', 'avg_actions']:
+            if col in df.columns:
+                df[col] = df[col].fillna(0)
+
+        # Merge assessment data
+        assess_agg = assessments_df.groupby('student_id').agg({
+            'mark': ['mean', 'std', 'count']
+        }).reset_index()
+        assess_agg.columns = ['student_id', 'avg_mark', 'mark_std', 'n_assessments']
+        df = df.merge(assess_agg, on='student_id', how='left')
+        df['avg_mark'] = df['avg_mark'].fillna(df['avg_mark'].median())
+        df['mark_std'] = df['mark_std'].fillna(0)
+        df['n_assessments'] = df['n_assessments'].fillna(0)
+
+        # Engagement rate (normalised)
+        df['engagement_rate'] = (df['total_actions'] / (df['total_actions'].max() + 1)) * 100
+
+        # Risk factors
+        df['low_engagement'] = (df['engagement_rate'] < 30).astype(int)
+        df['low_grade'] = (df['avg_mark'] < 50).astype(int)
+        df['high_grade_variance'] = (df['mark_std'] > 15).astype(int)
+
+        # Compute retention risk score
+        # Base risk from engagement + performance
+        base_risk = (
+            df['low_engagement'] * 30 +
+            df['low_grade'] * 25 +
+            df['high_grade_variance'] * 10 +
+            (100 - df['engagement_rate']) * 0.15 +
+            (50 - df['avg_mark'].clip(0, 100)) * 0.3
+        )
+
+        # Adjust for demographics (first-gen students slightly higher risk)
+        if 'first_generation_uni' in df.columns:
+            df['first_gen_risk'] = df['first_generation_uni'].apply(
+                lambda x: 10 if str(x).lower() in ['true', 'yes', '1'] else 0
+            )
+            base_risk = base_risk + df.get('first_gen_risk', 0)
+
+        # Adjust for IMD (lower IMD = higher deprivation = higher risk)
+        if 'imd_decile' in df.columns:
+            imd_risk = (10 - df['imd_decile'].clip(1, 10)) * 2
+            base_risk = base_risk + imd_risk
+
+        # Final risk score
+        df['risk_score'] = base_risk.clip(0, 100)
+
+        # Risk category
+        def risk_category(score):
+            if score >= 75: return 'Critical'
+            elif score >= 50: return 'High'
+            elif score >= 25: return 'Medium'
+            else: return 'Low'
+
+        df['risk_category'] = df['risk_score'].apply(risk_category)
+
+        # Retention risk (binary) — students with High or Critical risk
+        df['retention_risk'] = (df['risk_score'] >= 50).astype(int)
+
+        # Departure year
+        # For high-risk students, assign a departure year (1, 2, or 3)
+        df['departure_year'] = 0  # Default: retained
+        at_risk = df['retention_risk'] == 1
+        df.loc[at_risk, 'departure_year'] = np.random.choice(
+            [1, 2, 3], size=at_risk.sum(),
+            p=[0.50, 0.35, 0.15]  # Most leave in year 1
+        )
+
+        # Actual retention outcome
+        df['retained'] = 1 - df['retention_risk']
+
+        return df[[
+            'student_id', 'risk_score', 'risk_category', 'retention_risk',
+            'departure_year', 'retained', 'engagement_rate',
+            'avg_mark', 'total_logins', 'total_resources',
+            'low_engagement', 'low_grade'
+        ]]
+
 
 # Example usage
 if __name__ == "__main__":
