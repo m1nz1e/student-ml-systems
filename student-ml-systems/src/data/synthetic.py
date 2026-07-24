@@ -1216,6 +1216,74 @@ class SITSSyntheticGenerator:
             'feedback_response_rate', 'engagement_rate'
         ]]
 
+    def generate_module_enrollments(
+        self,
+        students_df: pd.DataFrame,
+        modules_df: pd.DataFrame,
+        assessments_df: pd.DataFrame,
+        seed: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """Historical module enrollment records."""
+        if seed is not None:
+            np.random.seed(seed)
+        records = []
+        for _, student in students_df.iterrows():
+            n_taken = np.random.randint(4, 7)
+            module_ids = modules_df['module_id'].sample(n=min(n_taken, len(modules_df)), random_state=None).tolist()
+            for mod_id in module_ids:
+                records.append({
+                    'student_id': student['student_id'],
+                    'module_id': mod_id,
+                    'year': np.random.randint(1, 4),
+                    'grade': np.random.uniform(40, 90),
+                    'completed': np.random.choice([0, 1], p=[0.05, 0.95])
+                })
+        return pd.DataFrame(records)
+
+    def generate_module_demand(
+        self,
+        modules_df: pd.DataFrame,
+        module_enrollments_df: pd.DataFrame,
+        students_df: pd.DataFrame,
+        year: int = 2025,
+        seed: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """Module demand predictions per module."""
+        if seed is not None:
+            np.random.seed(seed)
+        df = modules_df.copy()
+        # Get department from courses table via course_id
+        if 'department' not in df.columns and 'course_id' in df.columns:
+            courses = self.generate_courses()
+            df = df.merge(courses[['course_id', 'department']], on='course_id', how='left')
+        n = len(df)
+        hist_counts = module_enrollments_df.groupby('module_id').size().reset_index()
+        hist_counts.columns = ['module_id', 'historical_avg']
+        df = df.merge(hist_counts, on='module_id', how='left')
+        df['historical_avg'] = df['historical_avg'].fillna(0)
+        # Derive synthetic capacity from historical data if not present
+        if 'capacity' not in df.columns:
+            max_hist = df['historical_avg'].max() if df['historical_avg'].max() > 0 else 50
+            df['capacity'] = (df['historical_avg'] * 1.2 + np.random.uniform(5, 15, n)).clip(lower=10).astype(int)
+        df['base_demand'] = df['historical_avg'] * np.random.uniform(0.95, 1.15, n)
+        dept_popularity = {
+            'Computer Science': 1.3, 'Data Science': 1.25, 'Mathematics': 1.1,
+            'Business': 1.0, 'Engineering': 0.95, 'Science': 0.9, 'Humanities': 0.85, 'Arts': 0.8
+        }
+        df['dept_multiplier'] = df['department'].map(dept_popularity).fillna(1.0)
+        df['enrollment_count'] = (df['base_demand'] * df['dept_multiplier']).round().astype(int).clip(lower=5)
+        df['fill_rate'] = (df['enrollment_count'] / df['capacity'] * 100).clip(0, 150) if 'capacity' in df.columns else df['enrollment_count']
+        def demand_category(row):
+            rate = row.get('fill_rate', row.get('enrollment_count', 50))
+            if rate >= 100: return 'Oversubscribed'
+            elif rate >= 80: return 'High'
+            elif rate >= 50: return 'Medium'
+            else: return 'Low'
+        df['demand_category'] = df.apply(demand_category, axis=1)
+        df['popularity_score'] = (df['fill_rate'].clip(0, 100) * 0.7 + df['dept_multiplier'] * 30).clip(0, 100)
+        return df[['module_id', 'module_name', 'department', 'capacity',
+                    'enrollment_count', 'fill_rate', 'demand_category', 'popularity_score']]
+
 
 # Example usage
 if __name__ == "__main__":
