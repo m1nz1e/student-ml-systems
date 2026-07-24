@@ -1588,6 +1588,142 @@ class SITSSyntheticGenerator:
             'predicted_final_score'
         ]]
 
+    def generate_wellbeing_outcomes(
+        self,
+        students_df: pd.DataFrame,
+        vle_df: pd.DataFrame,
+        assessments_df: pd.DataFrame,
+        attendance_df: pd.DataFrame,
+        seed: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Generate student wellbeing scores.
+
+        Predicts:
+        - wellbeing_score: composite wellbeing (0-100)
+        - risk_level: ordinal (Critical/High/Medium/Low)
+        - at_risk: binary (wellbeing below threshold)
+        - support_need: ordinal (0-3, level of intervention needed)
+
+        Real data: UK university pastoral care records, NSS wellbeing items.
+
+        Args:
+            students_df: Student records
+            vle_df: VLE engagement records
+            assessments_df: Assessment records
+            attendance_df: Attendance records
+            seed: Random seed
+
+        Returns:
+            DataFrame with wellbeing outcomes per student
+        """
+        if seed is not None:
+            np.random.seed(seed)
+
+        df = students_df.copy()
+        n = len(df)
+
+        # Engagement metrics
+        vle_agg = vle_df.groupby('student_id').agg({
+            'logins': 'sum',
+            'resources_accessed': 'sum',
+            'total_actions': ['sum', 'mean']
+        }).reset_index()
+        vle_agg.columns = ['student_id', 'total_logins', 'total_resources', 'total_actions', 'avg_actions']
+        df = df.merge(vle_agg, on='student_id', how='left')
+        for col in ['total_logins', 'total_resources', 'total_actions', 'avg_actions']:
+            if col in df.columns:
+                df[col] = df[col].fillna(0)
+
+        # Normalised engagement rate
+        df['engagement_rate'] = (df['total_actions'] / (df['total_actions'].max() + 1)) * 100
+
+        # Assessment performance
+        assess_agg = assessments_df.groupby('student_id').agg({
+            'mark': ['mean', 'std']
+        }).reset_index()
+        assess_agg.columns = ['student_id', 'avg_mark', 'mark_std']
+        df = df.merge(assess_agg, on='student_id', how='left')
+        df['avg_mark'] = df['avg_mark'].fillna(df['avg_mark'].median())
+        df['mark_std'] = df['mark_std'].fillna(0)
+
+        # Attendance rate
+        if attendance_df is not None and len(attendance_df) > 0:
+            att_agg = attendance_df.groupby('student_id').agg({
+                'status': lambda x: (x == 'Present').sum()
+            }).reset_index()
+            att_agg.columns = ['student_id', 'sessions_attended']
+            total_sessions = attendance_df.groupby('student_id').size().reset_index(name='total')
+            att_agg = att_agg.merge(total_sessions, on='student_id')
+            att_agg['attendance_rate'] = (att_agg['sessions_attended'] / att_agg['total'] * 100).clip(0, 100)
+            df = df.merge(att_agg[['student_id', 'attendance_rate']], on='student_id', how='left')
+        else:
+            df['attendance_rate'] = 75.0
+        df['attendance_rate'] = df['attendance_rate'].fillna(75)
+
+        # Wellbeing score base
+        # High engagement + good attendance + reasonable grades → high wellbeing
+        # Struggling academically + disengaged → low wellbeing
+        engagement_factor = df['engagement_rate'] / 100 * 25
+        attendance_factor = df['attendance_rate'] / 100 * 20
+        grade_factor = (df['avg_mark'].clip(30, 90) - 30) / 60 * 25
+
+        # Known risk factors
+        risk_penalty = 0
+        if 'first_generation_uni' in df.columns:
+            risk_penalty += df['first_generation_uni'].apply(
+                lambda x: 8 if str(x).lower() in ['true', 'yes', '1'] else 0
+            )
+        if 'imd_decile' in df.columns:
+            risk_penalty += (10 - df['imd_decile'].clip(1, 10)) * 1.5
+        if 'care_leaver' in df.columns:
+            risk_penalty += df['care_leaver'].apply(
+                lambda x: 10 if str(x).lower() in ['true', 'yes', '1'] else 0
+            )
+
+        # Workload factor (too many assessments = stress)
+        n_assessments = assessments_df.groupby('student_id').size().reset_index(name='n_assessments')
+        df = df.merge(n_assessments, on='student_id', how='left')
+        df['n_assessments'] = df['n_assessments'].fillna(5)
+        workload_factor = (df['n_assessments'] / 10) * 5  # Up to 5 point penalty for heavy workload
+
+        df['wellbeing_score'] = (
+            30 +  # Base
+            engagement_factor +
+            attendance_factor +
+            grade_factor -
+            risk_penalty -
+            workload_factor +
+            np.random.uniform(-5, 5, n)
+        ).clip(0, 100).round(1)
+
+        # Risk level
+        def risk_level(score):
+            if score < 30: return 'Critical'
+            elif score < 50: return 'High'
+            elif score < 70: return 'Medium'
+            else: return 'Low'
+
+        df['risk_level'] = df['wellbeing_score'].apply(risk_level)
+
+        # At risk (score < 50)
+        df['at_risk'] = (df['wellbeing_score'] < 50).astype(int)
+
+        # Support need (0-3)
+        def support_need(score):
+            if score < 30: return 3  # Crisis
+            elif score < 45: return 2  # High need
+            elif score < 60: return 1  # Some need
+            else: return 0             # Low need
+
+        df['support_need'] = df['wellbeing_score'].apply(support_need)
+
+        return df[[
+            'student_id', 'wellbeing_score', 'risk_level', 'at_risk', 'support_need',
+            'engagement_rate', 'attendance_rate', 'avg_mark', 'total_logins',
+            'n_assessments', 'total_resources'
+        ]]
+
 
 # Example usage
 if __name__ == "__main__":
